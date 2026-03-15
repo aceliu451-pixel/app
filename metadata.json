@@ -1,0 +1,5 @@
+{
+  "name": "TaskFlow Timeline",
+  "description": "A visual task progress tracker that represents tasks as continuous lines and pauses as broken segments with achievements.",
+  "requestFramePermissions": []
+}
