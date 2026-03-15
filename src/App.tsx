@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Play, Pause, Plus, CheckCircle2, Trophy, Flag, ChevronLeft, Calendar as CalendarIcon, X, ChevronRight } from 'lucide-react';
 import { format, parseISO, differenceInDays, addDays, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, isWithinInterval, startOfWeek, endOfWeek, getWeekOfMonth, addMonths, subMonths, addWeeks, subWeeks } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
-import { toZonedTime } from 'date-fns-tz';
 
 type LogType = 'start' | 'update' | 'pause' | 'resume' | 'complete';
 
@@ -92,17 +91,52 @@ const initialTasks: TaskData[] = [
 ];
 
 export default function App() {
-  const [tasks, setTasks] = useState<TaskData[]>(initialTasks);
+  const [tasks, setTasks] = useState<TaskData[]>(() => {
+    const saved = localStorage.getItem('taskflow-tasks');
+    return saved ? JSON.parse(saved) : initialTasks;
+  });
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'month' | 'week'>('month');
-  const [currentDate, setCurrentDate] = useState(toZonedTime(new Date(), 'Asia/Shanghai'));
-  const [memos, setMemos] = useState<Record<string, string>>({});
+  const today = new Date();
+  const [currentDate, setCurrentDate] = useState(today);
+  const [memos, setMemos] = useState<Record<string, string>>(() => {
+    const saved = localStorage.getItem('taskflow-memos');
+    return saved ? JSON.parse(saved) : {};
+  });
   const [selectedMemoDate, setSelectedMemoDate] = useState<Date | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem('taskflow-tasks', JSON.stringify(tasks));
+  }, [tasks]);
+
+  useEffect(() => {
+    localStorage.setItem('taskflow-memos', JSON.stringify(memos));
+  }, [memos]);
 
   const selectedTask = tasks.find(t => t.taskId === selectedTaskId);
 
   const handleUpdateTask = (updatedTask: TaskData) => {
     setTasks(tasks.map(t => t.taskId === updatedTask.taskId ? updatedTask : t));
+  };
+
+  const handleAddTask = (taskName: string) => {
+    const newTask: TaskData = {
+      taskId: Date.now().toString(),
+      taskName,
+      totalProgress: 100,
+      currentProgress: 0,
+      status: 'ongoing',
+      startDate: format(new Date(), "yyyy-MM-dd'T'HH:mm:ss"),
+      historyLogs: [{
+        logId: Date.now().toString(),
+        type: 'start',
+        timestamp: format(new Date(), "yyyy-MM-dd'T'HH:mm:ss"),
+        progressVal: 0,
+        title: '项目启动',
+        note: '新建任务，开始执行！'
+      }]
+    };
+    setTasks([...tasks, newTask]);
   };
 
   return (
@@ -117,13 +151,15 @@ export default function App() {
               exit={{ opacity: 0, x: -20 }}
               className="flex flex-col h-full"
             >
-              <TaskListView 
-                tasks={tasks} 
-                onSelectTask={setSelectedTaskId} 
+              <TaskListView
+                tasks={tasks}
+                onSelectTask={setSelectedTaskId}
+                onAddTask={handleAddTask}
                 viewMode={viewMode}
                 setViewMode={setViewMode}
                 currentDate={currentDate}
                 setCurrentDate={setCurrentDate}
+                today={today}
                 memos={memos}
                 onOpenMemo={setSelectedMemoDate}
               />
@@ -205,13 +241,15 @@ function MemoModal({ date, initialContent, onSave, onClose }: { date: Date, init
 }
 
 // --- Task List View (Timeline) ---
-function TaskListView({ tasks, onSelectTask, viewMode, setViewMode, currentDate, setCurrentDate, memos, onOpenMemo }: { 
-  tasks: TaskData[], 
+function TaskListView({ tasks, onSelectTask, onAddTask, viewMode, setViewMode, currentDate, setCurrentDate, today, memos, onOpenMemo }: {
+  tasks: TaskData[],
   onSelectTask: (id: string) => void,
+  onAddTask: (taskName: string) => void,
   viewMode: 'month' | 'week',
   setViewMode: (mode: 'month' | 'week') => void,
   currentDate: Date,
   setCurrentDate: (date: Date) => void,
+  today: Date,
   memos: Record<string, string>,
   onOpenMemo: (date: Date) => void
 }) {
@@ -240,7 +278,7 @@ function TaskListView({ tasks, onSelectTask, viewMode, setViewMode, currentDate,
   };
 
   const handleToday = () => {
-    setCurrentDate(toZonedTime(new Date(), 'Asia/Shanghai'));
+    setCurrentDate(new Date());
   };
 
   return (
@@ -294,7 +332,13 @@ function TaskListView({ tasks, onSelectTask, viewMode, setViewMode, currentDate,
               月视图
             </button>
           </div>
-          <button className="bg-gray-900 hover:bg-gray-800 text-white px-4 py-2 md:px-5 md:py-2.5 rounded-xl text-xs md:text-sm font-semibold transition-colors flex items-center gap-1.5 md:gap-2 shadow-sm active:scale-95">
+          <button
+            onClick={() => {
+              const name = prompt('请输入任务名称：');
+              if (name && name.trim()) onAddTask(name.trim());
+            }}
+            className="bg-gray-900 hover:bg-gray-800 text-white px-4 py-2 md:px-5 md:py-2.5 rounded-xl text-xs md:text-sm font-semibold transition-colors flex items-center gap-1.5 md:gap-2 shadow-sm active:scale-95"
+          >
             <Plus size={16} />
             新建<span className="hidden md:inline">任务</span>
           </button>
@@ -312,13 +356,13 @@ function TaskListView({ tasks, onSelectTask, viewMode, setViewMode, currentDate,
             </div>
             <div className="flex-1 flex">
               {days.map(day => {
-                const isToday = isSameDay(day, currentDate);
+                const isToday = isSameDay(day, today);
                 const isWeekend = day.getDay() === 0 || day.getDay() === 6;
                 const dateKey = format(day, 'yyyy-MM-dd');
                 const hasMemo = !!memos[dateKey] && memos[dateKey].trim() !== '';
                 return (
-                  <div 
-                    key={day.toISOString()} 
+                  <div
+                    key={day.toISOString()}
                     onClick={() => onOpenMemo(day)}
                     className={`flex-1 flex flex-col items-center justify-center py-3 border-r border-gray-200 relative cursor-pointer hover:bg-gray-100/50 transition-colors active:bg-gray-200/50 ${isWeekend ? 'bg-gray-100/50' : ''}`}
                   >
@@ -346,7 +390,7 @@ function TaskListView({ tasks, onSelectTask, viewMode, setViewMode, currentDate,
               let currentSegStart: string | null = null;
 
               if (task.historyLogs.length === 0 && task.status === 'ongoing') {
-                activeSegments.push({ start: task.startDate, end: currentDate.toISOString() });
+                activeSegments.push({ start: task.startDate, end: today.toISOString() });
               } else {
                 task.historyLogs.forEach(log => {
                   if (log.type === 'start' || log.type === 'resume') {
@@ -362,7 +406,7 @@ function TaskListView({ tasks, onSelectTask, viewMode, setViewMode, currentDate,
                 });
 
                 if (currentSegStart) {
-                  const endStr = task.status === 'ongoing' ? currentDate.toISOString() : currentSegStart;
+                  const endStr = task.status === 'ongoing' ? today.toISOString() : currentSegStart;
                   activeSegments.push({ start: currentSegStart, end: endStr });
                 }
               }
@@ -389,7 +433,7 @@ function TaskListView({ tasks, onSelectTask, viewMode, setViewMode, currentDate,
                     {/* Grid Lines */}
                     {days.map(day => {
                        const isWeekend = day.getDay() === 0 || day.getDay() === 6;
-                       const isToday = isSameDay(day, currentDate);
+                       const isToday = isSameDay(day, today);
                        return (
                          <div key={day.toISOString()} className={`flex-1 border-r border-gray-100 relative ${isWeekend ? 'bg-gray-50/50' : ''}`}>
                            {isToday && <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-px bg-blue-200 z-0" />}
@@ -505,8 +549,7 @@ function TaskDetailView({ task, onBack, onUpdateTask }: { task: TaskData, onBack
   }, [task.historyLogs]);
 
   const handleAddLog = (title: string, note: string, progressAdd: number, type: 'update' | 'pause' | 'resume') => {
-    const now = toZonedTime(new Date(), 'Asia/Shanghai');
-    const timestamp = now.toISOString();
+    const timestamp = format(new Date(), "yyyy-MM-dd'T'HH:mm:ss", { locale: zhCN });
     
     let newProgress = task.currentProgress;
     if (type === 'update' || type === 'resume') {
