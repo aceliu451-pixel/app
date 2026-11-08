@@ -12,7 +12,8 @@ createRoot(document.getElementById('root')!).render(
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then((registration) => {
-      registration.update();
+      if (!registration) return;
+      void registration.update().catch(() => {});
 
       if (registration.waiting) {
         registration.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -26,6 +27,6 @@ if ('serviceWorker' in navigator) {
           }
         });
       });
-    });
+    }).catch(() => {});
   });
 }

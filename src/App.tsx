@@ -4,30 +4,13 @@ import { Play, Pause, Plus, CheckCircle2, Trophy, Flag, ChevronLeft, Calendar as
 import { format, parseISO, differenceInDays, addDays, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, isWithinInterval, startOfWeek, endOfWeek, getWeekOfMonth, addMonths, subMonths, addWeeks, subWeeks } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 
-type LogType = 'start' | 'update' | 'pause' | 'resume' | 'complete';
+import DOMPurify from 'dompurify';
+import { equal, type HistoryLog, type TaskData, type Snapshot } from './sync-data';
+import { useTaskFlowSync } from './use-taskflow-sync';
+import { SyncDialog } from './SyncDialog';
 
-interface HistoryLog {
-  logId: string;
-  type: LogType;
-  timestamp: string;
-  progressVal: number;
-  title: string;
-  note: string;
-  isSegmentBreak?: boolean;
-}
-
-interface TaskData {
-  taskId: string;
-  taskName: string;
-  totalProgress: number;
-  currentProgress: number;
-  status: 'ongoing' | 'paused' | 'completed';
-  startDate: string;
-  historyLogs: HistoryLog[];
-  retrospective?: {
-    content: string;
-    updatedAt: string;
-  };
+function newRecordId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function readJsonFromStorage<T>(key: string, fallback: T): T {
@@ -35,7 +18,6 @@ function readJsonFromStorage<T>(key: string, fallback: T): T {
     const saved = localStorage.getItem(key);
     return saved ? JSON.parse(saved) : fallback;
   } catch {
-    localStorage.removeItem(key);
     return fallback;
   }
 }
@@ -51,7 +33,15 @@ function escapeHtml(value: string): string {
 
 function memoTextToHtml(value: string): string {
   if (!value.trim()) return '';
-  if (/<\/?[a-z][\s\S]*>/i.test(value)) return value;
+  if (/<\/?[a-z][\s\S]*>/i.test(value)) {
+    return DOMPurify.sanitize(value, {
+      ALLOWED_TAGS: ['div', 'br', 'p', 'span', 'strong', 'b', 'i', 'em', 'u', 's', 'ul', 'ol', 'li', 'img', 'button', 'h1', 'h2', 'h3', 'blockquote', 'font', 'hr'],
+      ALLOWED_ATTR: ['class', 'src', 'alt', 'type', 'contenteditable', 'data-checked', 'data-placeholder', 'aria-checked', 'aria-label'],
+      ALLOW_DATA_ATTR: false,
+      FORBID_ATTR: ['style'],
+      ALLOWED_URI_REGEXP: /^data:image\/(?:jpeg|png|gif|webp);base64,/i,
+    });
+  }
   return value
     .split('\n')
     .map(line => line.trim() ? `<div>${escapeHtml(line)}</div>` : '<div><br></div>')
@@ -178,47 +168,46 @@ const initialTasks: TaskData[] = [
 ];
 
 export default function App() {
-  const [tasks, setTasks] = useState<TaskData[]>(() => {
-    return readJsonFromStorage('taskflow-tasks', initialTasks);
-  });
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'month' | 'week'>('month');
   const today = new Date();
   const [currentDate, setCurrentDate] = useState(today);
-  const [memos, setMemos] = useState<Record<string, string>>(() => {
-    return readJsonFromStorage('taskflow-memos', {});
-  });
   const [selectedMemoDate, setSelectedMemoDate] = useState<Date | null>(null);
+  const [showSync, setShowSync] = useState(false);
+  const [legacyData] = useState<Snapshot>(() => ({
+    tasks: readJsonFromStorage('taskflow-tasks', initialTasks),
+    memos: readJsonFromStorage('taskflow-memos', {}),
+  }));
+  const sync = useTaskFlowSync(legacyData, initialTasks, selectedMemoDate !== null);
+  const { tasks, memos } = sync.device.snapshot;
+  const selectedTask = tasks.find(task => task.taskId === selectedTaskId);
 
-  useEffect(() => {
-    localStorage.setItem('taskflow-tasks', JSON.stringify(tasks));
-  }, [tasks]);
+  const handleUpdateTask = (updatedTask: TaskData) => sync.edit(current => {
+    const previous = current.tasks.find(task => task.taskId === updatedTask.taskId);
+    if (!equal(previous, selectedTask)) throw new Error('任务已在另一处更新，请检查最新记录后重试');
+    return {
+      ...current,
+      tasks: current.tasks.map(task => task.taskId === updatedTask.taskId ? updatedTask : task),
+    };
+  });
 
-  useEffect(() => {
-    localStorage.setItem('taskflow-memos', JSON.stringify(memos));
-  }, [memos]);
-
-  const selectedTask = tasks.find(t => t.taskId === selectedTaskId);
-
-  const handleUpdateTask = (updatedTask: TaskData) => {
-    setTasks(tasks.map(t => t.taskId === updatedTask.taskId ? updatedTask : t));
-  };
-
-  const handleDeleteTask = (taskId: string) => {
-    setTasks(tasks.filter(t => t.taskId !== taskId));
-    setSelectedTaskId(null);
+  const handleDeleteTask = async (taskId: string) => {
+    if (await sync.edit(current => ({
+      ...current,
+      tasks: current.tasks.filter(task => task.taskId !== taskId),
+    }))) setSelectedTaskId(null);
   };
 
   const handleAddTask = (taskName: string) => {
     const newTask: TaskData = {
-      taskId: Date.now().toString(),
+      taskId: newRecordId(),
       taskName,
       totalProgress: 100,
       currentProgress: 0,
       status: 'ongoing',
       startDate: format(new Date(), "yyyy-MM-dd'T'HH:mm:ss"),
       historyLogs: [{
-        logId: Date.now().toString(),
+        logId: newRecordId(),
         type: 'start',
         timestamp: format(new Date(), "yyyy-MM-dd'T'HH:mm:ss"),
         progressVal: 0,
@@ -226,14 +215,14 @@ export default function App() {
         note: '新建任务，开始执行！'
       }]
     };
-    setTasks([...tasks, newTask]);
+    void sync.edit(current => ({ ...current, tasks: [...current.tasks, newTask] }));
   };
 
   return (
     <div className="app-canvas min-h-[100dvh] font-sans text-gray-900 flex justify-center">
       <div className="app-shell w-full max-w-6xl md:my-8 md:rounded-3xl border overflow-hidden flex flex-col min-h-[100dvh] h-[100dvh] md:h-[calc(100dvh-4rem)] relative">
         <AnimatePresence initial={false}>
-          {!selectedTaskId ? (
+          {!selectedTask ? (
             <motion.div 
               key="list"
               {...screenTransition}
@@ -250,6 +239,8 @@ export default function App() {
                 today={today}
                 memos={memos}
                 onOpenMemo={setSelectedMemoDate}
+                onOpenSync={() => setShowSync(true)}
+                syncAlert={!!sync.conflict || !!sync.status && sync.status !== '已同步' && !sync.status.startsWith('离线')}
               />
             </motion.div>
           ) : (
@@ -259,9 +250,10 @@ export default function App() {
               className="flex flex-col h-full transform-gpu"
             >
               <TaskDetailView 
-                task={selectedTask!} 
+                task={selectedTask}
                 onBack={() => setSelectedTaskId(null)} 
                 onUpdateTask={handleUpdateTask}
+                saveStatus={sync.status}
                 onDeleteTask={handleDeleteTask}
               />
             </motion.div>
@@ -272,24 +264,24 @@ export default function App() {
             <MemoModal
               date={selectedMemoDate}
               initialContent={memos[format(selectedMemoDate, 'yyyy-MM-dd')] || ''}
-              onSave={(content) => {
-                setMemos(prev => ({
-                  ...prev,
-                  [format(selectedMemoDate, 'yyyy-MM-dd')]: content
-                }));
-              }}
+              onSave={content => sync.edit(current => ({
+                ...current,
+                memos: { ...current.memos, [format(selectedMemoDate, 'yyyy-MM-dd')]: content },
+              }))}
               onClose={() => setSelectedMemoDate(null)}
             />
           )}
         </AnimatePresence>
+        {showSync && <SyncDialog controller={sync} onClose={() => setShowSync(false)} />}
       </div>
     </div>
   );
 }
 
 // --- Memo Modal (iOS Notes Style) ---
-function MemoModal({ date, initialContent, onSave, onClose }: { date: Date, initialContent: string, onSave: (content: string) => void, onClose: () => void }) {
-  const initialHtml = memoTextToHtml(initialContent);
+function MemoModal({ date, initialContent, onSave, onClose }: { date: Date, initialContent: string, onSave: (content: string) => Promise<boolean>, onClose: () => void }) {
+  const [initialHtml] = useState(() => memoTextToHtml(initialContent));
+  const [saveError, setSaveError] = useState(false);
   const [content, setContent] = useState(initialHtml);
   const editorRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -486,10 +478,10 @@ function MemoModal({ date, initialContent, onSave, onClose }: { date: Date, init
     insertHtmlIntoEditor(`<img src="${dataUrl}" alt="备忘录图片">`);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const html = editorRef.current?.innerHTML || content;
-    onSave(isEmptyHtml(html) ? '' : html);
-    onClose();
+    if (await onSave(isEmptyHtml(html) ? '' : html)) onClose();
+    else setSaveError(true);
   };
 
   return (
@@ -501,6 +493,7 @@ function MemoModal({ date, initialContent, onSave, onClose }: { date: Date, init
       className="fixed inset-0 z-50 flex flex-col bg-[#f2f2f7] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] md:p-12"
     >
       <div className="flex-1 bg-white md:rounded-2xl md:shadow-2xl overflow-hidden flex flex-col max-w-3xl w-full mx-auto">
+        {saveError && <p role="alert" className="px-4 py-2 text-sm text-red-700">本机保存失败，备忘还在编辑器里。请重试或先复制内容。</p>}
         {/* Header */}
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-100 bg-white/80 backdrop-blur-md">
           <button onClick={onClose} className="text-blue-500 text-[17px] flex items-center active:opacity-70 transition-opacity">
@@ -614,7 +607,7 @@ function MemoModal({ date, initialContent, onSave, onClose }: { date: Date, init
 }
 
 // --- Task List View (Timeline) ---
-function TaskListView({ tasks, onSelectTask, onAddTask, viewMode, setViewMode, currentDate, setCurrentDate, today, memos, onOpenMemo }: {
+function TaskListView({ tasks, onSelectTask, onAddTask, viewMode, setViewMode, currentDate, setCurrentDate, today, memos, onOpenMemo, onOpenSync, syncAlert }: {
   tasks: TaskData[],
   onSelectTask: (id: string) => void,
   onAddTask: (taskName: string) => void,
@@ -624,7 +617,9 @@ function TaskListView({ tasks, onSelectTask, onAddTask, viewMode, setViewMode, c
   setCurrentDate: (date: Date) => void,
   today: Date,
   memos: Record<string, string>,
-  onOpenMemo: (date: Date) => void
+  onOpenMemo: (date: Date) => void,
+  onOpenSync: () => void,
+  syncAlert: boolean,
 }) {
   const startDate = viewMode === 'month' ? startOfMonth(currentDate) : startOfWeek(currentDate, { weekStartsOn: 1 });
   const endDate = viewMode === 'month' ? endOfMonth(currentDate) : endOfWeek(currentDate, { weekStartsOn: 1 });
@@ -730,6 +725,9 @@ function TaskListView({ tasks, onSelectTask, onAddTask, viewMode, setViewMode, c
               月视图
             </button>
           </div>
+          <button onClick={onOpenSync} className="shrink-0 whitespace-nowrap rounded-lg border border-gray-200 px-2.5 py-2 text-xs font-medium text-blue-700 md:text-sm">
+            {syncAlert ? '同步 · 待处理' : '同步'}
+          </button>
           <button
             onClick={() => {
               const name = prompt('请输入任务名称：');
@@ -1030,7 +1028,8 @@ function TaskListView({ tasks, onSelectTask, onAddTask, viewMode, setViewMode, c
 }
 
 // --- Task Detail View ---
-function TaskDetailView({ task, onBack, onUpdateTask, onDeleteTask }: { task: TaskData, onBack: () => void, onUpdateTask: (t: TaskData) => void, onDeleteTask: (taskId: string) => void }) {
+function TaskDetailView({ task, onBack, onUpdateTask, onDeleteTask, saveStatus }: { task: TaskData, onBack: () => void, onUpdateTask: (t: TaskData) => Promise<boolean>, onDeleteTask: (taskId: string) => void, saveStatus: string }) {
+  const [saveError, setSaveError] = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
   const [modalConfig, setModalConfig] = useState<{ isOpen: boolean, type: 'update' | 'pause' | 'resume' | null }>({ isOpen: false, type: null });
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
@@ -1046,7 +1045,7 @@ function TaskDetailView({ task, onBack, onUpdateTask, onDeleteTask }: { task: Ta
     scrollToBottom();
   }, [task.historyLogs]);
 
-  const handleAddLog = (title: string, note: string, progressAdd: number, type: 'update' | 'pause' | 'resume') => {
+  const handleAddLog = async (title: string, note: string, progressAdd: number, type: 'update' | 'pause' | 'resume') => {
     const timestamp = format(new Date(), "yyyy-MM-dd'T'HH:mm:ss", { locale: zhCN });
     
     let newProgress = task.currentProgress;
@@ -1058,7 +1057,7 @@ function TaskDetailView({ task, onBack, onUpdateTask, onDeleteTask }: { task: Ta
     const finalType = isComplete ? 'complete' : type;
 
     const newLog: HistoryLog = {
-      logId: Date.now().toString(),
+      logId: newRecordId(),
       type: finalType,
       timestamp,
       progressVal: newProgress,
@@ -1069,34 +1068,34 @@ function TaskDetailView({ task, onBack, onUpdateTask, onDeleteTask }: { task: Ta
 
     const justCompleted = isComplete && task.status !== 'completed';
 
-    if (justCompleted) {
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 3000);
-    }
-
-    onUpdateTask({
+    const saved = await onUpdateTask({
       ...task,
       currentProgress: newProgress,
       status: isComplete ? 'completed' : finalType === 'pause' ? 'paused' : 'ongoing',
-      historyLogs: [...task.historyLogs, newLog]
+      historyLogs: [...task.historyLogs, newLog],
     });
+    setSaveError(!saved);
+    if (!saved) return;
 
     if (justCompleted) {
+      setShowConfetti(true);
+      setTimeout(() => setShowConfetti(false), 3000);
       setIsCompletionPromptOpen(true);
     }
-    
+
     setModalConfig({ isOpen: false, type: null });
   };
 
-  const handleSaveRetrospective = (content: string) => {
-    onUpdateTask({
+  const handleSaveRetrospective = async (content: string) => {
+    const saved = await onUpdateTask({
       ...task,
       retrospective: {
         content,
-        updatedAt: format(new Date(), "yyyy-MM-dd'T'HH:mm:ss")
-      }
+        updatedAt: format(new Date(), "yyyy-MM-dd'T'HH:mm:ss"),
+      },
     });
-    setIsRetrospectiveOpen(false);
+    setSaveError(!saved);
+    if (saved) setIsRetrospectiveOpen(false);
   };
 
   const daysSinceStart = Math.max(0, differenceInDays(new Date(), parseISO(task.startDate)));
@@ -1105,6 +1104,7 @@ function TaskDetailView({ task, onBack, onUpdateTask, onDeleteTask }: { task: Ta
 
   return (
     <div className="app-surface flex flex-col h-full relative">
+      {saveError && <p role="alert" className="pointer-events-none absolute inset-x-4 bottom-4 z-[70] rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{saveStatus}</p>}
       {/* Confetti Overlay */}
       <AnimatePresence>
         {showConfetti && (
