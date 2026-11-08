@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { get, put } from '@vercel/blob';
-import { isSnapshot } from '../src/sync-data';
+import { isTaskFlowSnapshot } from '../src/sync-schema.js';
 
 const pathname = 'taskflow/snapshot-v1.json';
 const maximumBytes = 4_000_000;
@@ -45,7 +45,7 @@ export default async function handler(request: IncomingMessage & { body?: unknow
     if (creating === (typeof previous === 'string')) return reply(response, 428, { error: '缺少版本条件' });
 
     const body = typeof request.body === 'string' ? JSON.parse(request.body) : request.body;
-    if (!isSnapshot(body)) return reply(response, 400, { error: '同步数据格式有误' });
+    if (!isTaskFlowSnapshot(body)) return reply(response, 400, { error: '同步数据格式有误' });
     const data = JSON.stringify(body);
     if (Buffer.byteLength(data) > maximumBytes) return reply(response, 413, { error: '同步数据超过 4 MB' });
 
@@ -68,7 +68,8 @@ export default async function handler(request: IncomingMessage & { body?: unknow
       await latest?.stream?.cancel();
       throw error;
     }
-  } catch {
+  } catch (error) {
+    console.error('TaskFlow sync storage error', error instanceof Error ? error.name : 'unknown');
     return reply(response, 503, { error: '同步服务暂不可用' });
   }
 }
